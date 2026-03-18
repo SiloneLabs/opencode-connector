@@ -27,8 +27,7 @@ io.use(async (socket, next) => {
 
   const userId = await fetchUserIdFromToken(token as string);
   if (!userId) {
-    console.error("fatal: token validation returned null userId, crashing");
-    process.exit(1);
+    return next(new Error("invalid or expired token"));
   }
 
   (socket as any).userId = userId;
