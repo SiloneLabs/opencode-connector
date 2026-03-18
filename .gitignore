@@ -1,0 +1,4 @@
+# deps
+node_modules/
+.bash_history
+.test
