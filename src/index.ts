@@ -219,6 +219,9 @@ let debounceTimer: Timer | null = null;
 (async () => {
   const watcher = watch(PROJECT_DIR_ABS, { recursive: true });
   for await (const event of watcher) {
+    if (event.filename) {
+      io.emit("file:changed", { path: event.filename });
+    }
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(async () => {
       const tree = await generateFileTree(PROJECT_DIR, true);
