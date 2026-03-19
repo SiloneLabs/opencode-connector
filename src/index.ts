@@ -67,12 +67,11 @@ io.on("connection", async (socket) => {
 
   function spawnShell(cols: number, rows: number) {
     if (shell) return;
-    shell = Bun.spawn(["bash"], {
+    shell = Bun.spawn(["bash", "--login"], {
       cwd: PROJECT_DIR_ABS,
       env: {
+        ...process.env,
         TERM: "xterm-256color",
-        HOME: PROJECT_DIR_ABS,
-        PATH: process.env.PATH || "",
       },
       terminal: {
         cols,
@@ -87,6 +86,7 @@ io.on("connection", async (socket) => {
   function spawnOpencode(cols: number, rows: number) {
     if (opencode) return;
     const userId = (socket as any).userId;
+    console.log(`[spawnOpencode] userId=${userId} cols=${cols} rows=${rows}`);
     opencode = Bun.spawn(["opencode"], {
       cwd: PROJECT_DIR_ABS,
       env: {
