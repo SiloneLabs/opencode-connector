@@ -35,7 +35,7 @@ io.use(async (socket, next) => {
 });
 
 const PROJECT_DIR = "../project";
-const PROJECT_DIR_ABS = resolve(PROJECT_DIR);
+const PROJECT_DIR_ABS = resolve("/root/project");
 
 /** resolve a user-supplied path safely within the project dir */
 function safePath(userPath: string): string {
