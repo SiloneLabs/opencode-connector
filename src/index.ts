@@ -80,7 +80,11 @@ io.on("connection", async (socket) => {
   socket.on("file:tree:expand", async (dir: string) => {
     try {
       const safeDir = safePath(dir);
-      const tree = await generateFileTree(safeDir);
+      const segments = dir.split("/");
+      const isInsideLazy = segments.some((s) => LAZY_DIRS.has(s));
+      const tree = isInsideLazy
+        ? await generateShallowTree(safeDir)
+        : await generateFileTree(safeDir);
       socket.emit("file:tree:expand", { dir, tree });
     } catch (e: any) {
       socket.emit("file:tree:expand", { dir, tree: [], error: e.message });
