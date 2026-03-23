@@ -9,10 +9,10 @@ import {
   rm,
   rename,
   stat,
-  watch,
 } from "fs/promises";
 import { resolve } from "path";
 import { cors } from "hono/cors";
+import chokidar from "chokidar";
 import { fetchUserIdFromToken } from "./helper";
 
 const io = new Server({ cors: { origin: "*" } });
@@ -37,6 +37,14 @@ io.use(async (socket, next) => {
 const PROJECT_DIR = "./project";
 const PROJECT_DIR_ABS = resolve(PROJECT_DIR);
 
+const sessions = new Map<
+  string,
+  {
+    shell: ReturnType<typeof Bun.spawn> | null;
+    opencode: ReturnType<typeof Bun.spawn> | null;
+  }
+>();
+
 /** resolve a user-supplied path safely within the project dir */
 function safePath(userPath: string): string {
   const abs = resolve(PROJECT_DIR_ABS, userPath);
@@ -46,7 +54,25 @@ function safePath(userPath: string): string {
   return abs;
 }
 
+function killPty(proc: ReturnType<typeof Bun.spawn> | null) {
+  if (!proc) return;
+  try {
+    proc.kill();
+    proc.terminal?.close();
+  } catch (_) {}
+}
+
 io.on("connection", async (socket) => {
+  const userId = (socket as any).userId as string;
+
+  // kill stale session if user reconnects (e.g. page reload)
+  if (sessions.has(userId)) {
+    const old = sessions.get(userId)!;
+    killPty(old.shell);
+    killPty(old.opencode);
+  }
+  sessions.set(userId, { shell: null, opencode: null });
+
   // send initial file tree
   const tree = await generateFileTree(PROJECT_DIR, true);
   socket.emit("file:tree", tree);
@@ -62,12 +88,14 @@ io.on("connection", async (socket) => {
   });
 
   // deferred terminal spawn — wait for client to send dimensions
-  let shell: ReturnType<typeof Bun.spawn> | null = null;
-  let opencode: ReturnType<typeof Bun.spawn> | null = null;
-
   function spawnShell(cols: number, rows: number) {
-    if (shell) return;
-    shell = Bun.spawn(["bash", "--login"], {
+    const session = sessions.get(userId);
+    if (!session) return;
+
+    // kill stale shell before respawn
+    killPty(session.shell);
+
+    session.shell = Bun.spawn(["bash", "--login"], {
       cwd: PROJECT_DIR_ABS,
       env: {
         ...process.env,
@@ -84,10 +112,14 @@ io.on("connection", async (socket) => {
   }
 
   function spawnOpencode(cols: number, rows: number) {
-    if (opencode) return;
-    const userId = (socket as any).userId;
+    const session = sessions.get(userId);
+    if (!session) return;
+
+    // kill stale opencode before respawn
+    killPty(session.opencode);
+
     console.log(`[spawnOpencode] userId=${userId} cols=${cols} rows=${rows}`);
-    opencode = Bun.spawn(["opencode"], {
+    session.opencode = Bun.spawn(["opencode"], {
       cwd: PROJECT_DIR_ABS,
       env: {
         TERM: "xterm-256color",
@@ -106,16 +138,17 @@ io.on("connection", async (socket) => {
 
   // terminal input
   socket.on("terminal:write:shell", (data: string) => {
-    shell?.terminal?.write(data);
+    sessions.get(userId)?.shell?.terminal?.write(data);
   });
   socket.on("terminal:write:opencode", (data: string) => {
-    opencode?.terminal?.write(data);
+    sessions.get(userId)?.opencode?.terminal?.write(data);
   });
 
   // terminal resize — spawn on first resize, then resize after
   socket.on(
     "terminal:resize:shell",
     ({ cols, rows }: { cols: number; rows: number }) => {
+      const shell = sessions.get(userId)?.shell;
       if (!shell) {
         spawnShell(cols, rows);
       } else {
@@ -126,6 +159,7 @@ io.on("connection", async (socket) => {
   socket.on(
     "terminal:resize:opencode",
     ({ cols, rows }: { cols: number; rows: number }) => {
+      const opencode = sessions.get(userId)?.opencode;
       if (!opencode) {
         spawnOpencode(cols, rows);
       } else {
@@ -206,29 +240,48 @@ io.on("connection", async (socket) => {
 
   // cleanup on disconnect
   socket.on("disconnect", () => {
-    shell?.kill();
-    shell?.terminal?.close();
-    opencode?.kill();
-    opencode?.terminal?.close();
+    const session = sessions.get(userId);
+    if (session) {
+      killPty(session.shell);
+      killPty(session.opencode);
+      sessions.delete(userId);
+    }
   });
 });
 
 // watch project dir, debounce + push refreshed tree to all clients
 let debounceTimer: Timer | null = null;
 
-(async () => {
-  const watcher = watch(PROJECT_DIR_ABS, { recursive: true });
-  for await (const event of watcher) {
-    if (event.filename) {
-      io.emit("file:changed", { path: event.filename });
-    }
-    if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(async () => {
-      const tree = await generateFileTree(PROJECT_DIR, true);
-      io.emit("file:tree", tree);
-    }, 300);
+const watcher = chokidar.watch(PROJECT_DIR_ABS, {
+  ignored: [
+    "**/node_modules/**",
+    "**/target/**",
+    "**/.next/**",
+    "**/.git/**",
+    "**/.soroban/**",
+    "**/*.log",
+  ],
+  ignoreInitial: true,
+  persistent: true,
+  depth: 10,
+  awaitWriteFinish: {
+    stabilityThreshold: 200,
+    pollInterval: 100,
+  },
+  usePolling: false,
+});
+
+watcher.on("all", (_event, filePath) => {
+  const relative = filePath.slice(PROJECT_DIR_ABS.length + 1);
+  if (relative) {
+    io.emit("file:changed", { path: relative });
   }
-})();
+  if (debounceTimer) clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(async () => {
+    const tree = await generateFileTree(PROJECT_DIR, true);
+    io.emit("file:tree", tree);
+  }, 300);
+});
 
 const app = new Hono();
 
@@ -271,7 +324,7 @@ type FileTreeNode = {
 };
 
 const ROOT_ALLOW = new Set(["contract", "client", "README.md"]);
-const LAZY_DIRS = new Set(["node_modules", "target"]);
+const LAZY_DIRS = new Set(["node_modules", "target", ".next"]);
 
 async function generateShallowTree(dir: string): Promise<FileTreeNode[]> {
   const entries = await readdir(dir, { withFileTypes: true });
