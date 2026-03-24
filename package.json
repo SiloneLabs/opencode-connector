@@ -2,7 +2,8 @@
   "name": "connector",
   "scripts": {
     "dev": "bun run --hot src/index.ts",
-    "start": "bun run src/index.ts"
+    "start": "bun run src/index.ts",
+    ":opencode": "bun run --hot src/opencode/index.ts"
   },
   "dependencies": {
     "@socket.io/bun-engine": "^0.1.0",
