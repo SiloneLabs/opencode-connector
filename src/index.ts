@@ -36,6 +36,15 @@ io.use(async (socket, next) => {
 
 const PROJECT_DIR = "./project";
 const PROJECT_DIR_ABS = resolve(PROJECT_DIR);
+const ROOT_ALLOW = new Set(["contract", "client", "README.md"]);
+const LAZY_DIRS = new Set(["node_modules", "target", ".next"]);
+const IGNORED_NAMES = new Set([
+  "node_modules",
+  "target",
+  ".next",
+  ".git",
+  ".soroban",
+]);
 
 const sessions = new Map<
   string,
@@ -334,16 +343,6 @@ type FileTreeNode = {
   children?: FileTreeNode[];
   lazy?: boolean;
 };
-
-const ROOT_ALLOW = new Set(["contract", "client", "README.md"]);
-const LAZY_DIRS = new Set(["node_modules", "target", ".next"]);
-const IGNORED_NAMES = new Set([
-  "node_modules",
-  "target",
-  ".next",
-  ".git",
-  ".soroban",
-]);
 
 async function generateShallowTree(dir: string): Promise<FileTreeNode[]> {
   const entries = await readdir(dir, { withFileTypes: true });
