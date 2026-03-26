@@ -256,36 +256,44 @@ io.on("connection", async (socket) => {
 // watch project dir, debounce + push refreshed tree to all clients
 let debounceTimer: Timer | null = null;
 
+const STRUCTURAL_EVENTS = new Set(["add", "unlink", "addDir", "unlinkDir"]);
+
 const watcher = chokidar.watch(PROJECT_DIR_ABS, {
-  ignored: [
-    "**/node_modules/**",
-    "**/target/**",
-    "**/.next/**",
-    "**/.git/**",
-    "**/.soroban/**",
-    "**/*.log",
-  ],
+  ignored: (filePath: string) => {
+    const basename = filePath.split("/").pop() || "";
+    return IGNORED_NAMES.has(basename) || basename.endsWith(".log");
+  },
   ignoreInitial: true,
   persistent: true,
-  depth: 10,
-  awaitWriteFinish: {
-    stabilityThreshold: 200,
-    pollInterval: 100,
-  },
   usePolling: false,
 });
 
-watcher.on("all", (_event, filePath) => {
+watcher.on("error", (err) => {
+  console.error("[watcher] error:", err.message);
+});
+
+watcher.on("all", (event, filePath) => {
   const relative = filePath.slice(PROJECT_DIR_ABS.length + 1);
   if (relative) {
     io.emit("file:changed", { path: relative });
   }
-  if (debounceTimer) clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(async () => {
-    const tree = await generateFileTree(PROJECT_DIR, true);
-    io.emit("file:tree", tree);
-  }, 300);
+  // only regen tree for structural changes (add/remove), not content edits
+  if (STRUCTURAL_EVENTS.has(event)) {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(async () => {
+      const tree = await generateFileTree(PROJECT_DIR, true);
+      io.emit("file:tree", tree);
+    }, 300);
+  }
 });
+
+// cleanup watchers on process exit so PM2 restarts don't leak
+function cleanup() {
+  watcher.close();
+  process.exit(0);
+}
+process.on("SIGTERM", cleanup);
+process.on("SIGINT", cleanup);
 
 const app = new Hono();
 
@@ -329,6 +337,13 @@ type FileTreeNode = {
 
 const ROOT_ALLOW = new Set(["contract", "client", "README.md"]);
 const LAZY_DIRS = new Set(["node_modules", "target", ".next"]);
+const IGNORED_NAMES = new Set([
+  "node_modules",
+  "target",
+  ".next",
+  ".git",
+  ".soroban",
+]);
 
 async function generateShallowTree(dir: string): Promise<FileTreeNode[]> {
   const entries = await readdir(dir, { withFileTypes: true });
