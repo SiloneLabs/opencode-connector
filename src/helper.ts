@@ -1,6 +1,11 @@
 export const fetchUserIdFromToken = async (
   token: string,
 ): Promise<string | null> => {
+  // Dev mode: accept "dev-token" without calling instance-manager
+  if (process.env.NODE_ENV !== "production" && token === "dev-token") {
+    return "dev-user";
+  }
+
   try {
     const res = await fetch(
       "https://instance-manager.silonelabs.workers.dev/api/v1/projects/verify-token",

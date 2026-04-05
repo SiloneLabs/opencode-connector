@@ -37,13 +37,16 @@ io.use(async (socket, next) => {
 const PROJECT_DIR = "./project";
 const PROJECT_DIR_ABS = resolve(PROJECT_DIR);
 
-const sessions = new Map<
-  string,
-  {
-    shell: ReturnType<typeof Bun.spawn> | null;
-    opencode: ReturnType<typeof Bun.spawn> | null;
-  }
->();
+const OPENCODE_BASE_URL =
+  process.env.OPENCODE_BASE_URL || "http://localhost:4096";
+
+interface OpenCodeSession {
+  shell: ReturnType<typeof Bun.spawn> | null;
+  sseAbort: AbortController | null;
+  sessionId: string | null;
+}
+
+const sessions = new Map<string, OpenCodeSession>();
 
 /** resolve a user-supplied path safely within the project dir */
 function safePath(userPath: string): string {
@@ -62,6 +65,88 @@ function killPty(proc: ReturnType<typeof Bun.spawn> | null) {
   } catch (_) {}
 }
 
+/** Subscribe to OpenCode SSE and forward events via Socket.IO */
+function startSSEBridge(socket: any, userId: string) {
+  const session = sessions.get(userId);
+  if (!session) return;
+
+  // Abort any existing SSE connection
+  session.sseAbort?.abort();
+  const abort = new AbortController();
+  session.sseAbort = abort;
+
+  (async () => {
+    try {
+      const res = await fetch(`${OPENCODE_BASE_URL}/event`, {
+        headers: { Accept: "text/event-stream" },
+        signal: abort.signal,
+      });
+
+      if (!res.ok || !res.body) {
+        socket.emit("opencode:error", { error: "Failed to connect to OpenCode event stream" });
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let currentEvent = "";
+      let currentData = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (line.startsWith("event:")) {
+            currentEvent = line.slice(6).trim();
+          } else if (line.startsWith("data:")) {
+            currentData += line.slice(5).trim();
+          } else if (line.trim() === "") {
+            // Empty line = end of SSE message
+            if (currentEvent && currentData) {
+              try {
+                const parsed = JSON.parse(currentData);
+                socket.emit("opencode:event", {
+                  type: currentEvent,
+                  data: parsed,
+                });
+              } catch {
+                socket.emit("opencode:event", {
+                  type: currentEvent,
+                  data: currentData,
+                });
+              }
+            } else if (currentData && !currentEvent) {
+              try {
+                const parsed = JSON.parse(currentData);
+                // Try to infer event type from data
+                if (parsed.type) {
+                  socket.emit("opencode:event", {
+                    type: parsed.type,
+                    data: parsed,
+                  });
+                }
+              } catch {}
+            }
+            currentEvent = "";
+            currentData = "";
+          }
+        }
+      }
+    } catch (err: any) {
+      if (err.name !== "AbortError") {
+        console.error("[SSE] error:", err.message);
+        socket.emit("opencode:error", { error: "SSE connection lost" });
+      }
+    }
+  })();
+}
+
 io.on("connection", async (socket) => {
   const userId = (socket as any).userId as string;
 
@@ -69,9 +154,9 @@ io.on("connection", async (socket) => {
   if (sessions.has(userId)) {
     const old = sessions.get(userId)!;
     killPty(old.shell);
-    killPty(old.opencode);
+    old.sseAbort?.abort();
   }
-  sessions.set(userId, { shell: null, opencode: null });
+  sessions.set(userId, { shell: null, sseAbort: null, sessionId: null });
 
   // send initial file tree
   const tree = await generateFileTree(PROJECT_DIR, true);
@@ -99,56 +184,33 @@ io.on("connection", async (socket) => {
     // kill stale shell before respawn
     killPty(session.shell);
 
-    session.shell = Bun.spawn(["bash", "--login"], {
-      cwd: PROJECT_DIR_ABS,
-      env: {
-        ...process.env,
-        TERM: "xterm-256color",
-      },
-      terminal: {
-        cols,
-        rows,
-        data(_t: any, d: Uint8Array) {
-          socket.emit("terminal:data:shell", Buffer.from(d).toString());
+    try {
+      session.shell = Bun.spawn(["bash", "--login"], {
+        cwd: PROJECT_DIR_ABS,
+        env: {
+          ...process.env,
+          TERM: "xterm-256color",
         },
-      },
-    });
+        terminal: {
+          cols,
+          rows,
+          data(_t: any, d: Uint8Array) {
+            socket.emit("terminal:data:shell", Buffer.from(d).toString());
+          },
+        },
+      });
+    } catch (err: any) {
+      console.warn("[spawnShell] PTY not supported on this platform:", err.message);
+      socket.emit("terminal:data:shell", "\r\n[Terminal not available on this platform]\r\n");
+    }
   }
 
-  function spawnOpencode(cols: number, rows: number) {
-    const session = sessions.get(userId);
-    if (!session) return;
-
-    // kill stale opencode before respawn
-    killPty(session.opencode);
-
-    console.log(`[spawnOpencode] userId=${userId} cols=${cols} rows=${rows}`);
-    session.opencode = Bun.spawn(["opencode"], {
-      cwd: PROJECT_DIR_ABS,
-      env: {
-        TERM: "xterm-256color",
-        PATH: process.env.PATH || "",
-        ANTHROPIC_API_KEY: userId,
-      },
-      terminal: {
-        cols,
-        rows,
-        data(_t: any, d: Uint8Array) {
-          socket.emit("terminal:data:opencode", Buffer.from(d).toString());
-        },
-      },
-    });
-  }
-
-  // terminal input
+  // terminal input (shell only — opencode no longer uses PTY)
   socket.on("terminal:write:shell", (data: string) => {
     sessions.get(userId)?.shell?.terminal?.write(data);
   });
-  socket.on("terminal:write:opencode", (data: string) => {
-    sessions.get(userId)?.opencode?.terminal?.write(data);
-  });
 
-  // terminal resize — spawn on first resize, then resize after
+  // terminal resize — shell only
   socket.on(
     "terminal:resize:shell",
     ({ cols, rows }: { cols: number; rows: number }) => {
@@ -156,21 +218,88 @@ io.on("connection", async (socket) => {
       if (!shell) {
         spawnShell(cols, rows);
       } else {
-        shell.terminal?.resize(cols, rows);
+        try { shell.terminal?.resize(cols, rows); } catch {}
       }
     },
   );
+
+  // ── OpenCode API events ──────────────────────────────────────────
+
+  // Auto-create session + SSE bridge helper
+  async function createOpenCodeSession(title: string) {
+    try {
+      const res = await fetch(`${OPENCODE_BASE_URL}/session`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+      const session = await res.json();
+      const userSession = sessions.get(userId);
+      if (userSession) userSession.sessionId = session.id;
+
+      socket.emit("opencode:session:created", session);
+      startSSEBridge(socket, userId);
+    } catch (err: any) {
+      socket.emit("opencode:error", { error: "Failed to create session", details: err.message });
+    }
+  }
+
+  // Auto-create session on connection
+  createOpenCodeSession("IDE Session");
+
+  // Also allow client to request a new session (e.g. "New Chat")
+  socket.on("opencode:session:create", async (data?: { title?: string }) => {
+    await createOpenCodeSession(data?.title || "New Session");
+  });
+
+  // List sessions
+  socket.on("opencode:sessions:list", async () => {
+    try {
+      const res = await fetch(`${OPENCODE_BASE_URL}/session`);
+      const data = await res.json();
+      socket.emit("opencode:sessions:list:result", data);
+    } catch (err: any) {
+      socket.emit("opencode:error", { error: "Failed to list sessions", details: err.message });
+    }
+  });
+
+  // Send prompt
   socket.on(
-    "terminal:resize:opencode",
-    ({ cols, rows }: { cols: number; rows: number }) => {
-      const opencode = sessions.get(userId)?.opencode;
-      if (!opencode) {
-        spawnOpencode(cols, rows);
-      } else {
-        opencode.terminal?.resize(cols, rows);
+    "opencode:prompt",
+    async (data: { sessionId: string; text: string; providerID?: string; modelID?: string }) => {
+      try {
+        const res = await fetch(`${OPENCODE_BASE_URL}/session/${data.sessionId}/message`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: {
+              providerID: data.providerID || "opencode",
+              modelID: data.modelID || "big-pickle",
+            },
+            parts: [{ type: "text", text: data.text }],
+          }),
+        });
+        if (res.ok) {
+          const result = await res.json();
+          socket.emit("opencode:message:complete", result);
+        }
+        socket.emit("opencode:prompt:sent", { ok: true });
+      } catch (err: any) {
+        socket.emit("opencode:error", { error: "Failed to send prompt", details: err.message });
       }
     },
   );
+
+  // Get messages for a session
+  socket.on("opencode:messages:list", async (data: { sessionId: string }) => {
+    try {
+      const res = await fetch(`${OPENCODE_BASE_URL}/session/${data.sessionId}/message`);
+      const messages = await res.json();
+      socket.emit("opencode:messages:list:result", messages);
+    } catch (err: any) {
+      socket.emit("opencode:error", { error: "Failed to list messages", details: err.message });
+    }
+  });
 
   // filesystem operations
   socket.on("file:read", async (path: string) => {
@@ -247,7 +376,7 @@ io.on("connection", async (socket) => {
     const session = sessions.get(userId);
     if (session) {
       killPty(session.shell);
-      killPty(session.opencode);
+      session.sseAbort?.abort();
       sessions.delete(userId);
     }
   });
