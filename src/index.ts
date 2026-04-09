@@ -252,6 +252,20 @@ io.on("connection", async (socket) => {
     await createOpenCodeSession(data?.title || "New Session");
   });
 
+  // List providers + models
+  socket.on("opencode:providers:list", async () => {
+    try {
+      const res = await fetch(`${OPENCODE_BASE_URL}/config/providers`);
+      if (!res.ok) throw new Error(`OpenCode ${res.status}`);
+      const data = await res.json();
+      // OpenCode returns { providers: [...], default: {...} } — client expects ProviderInfo[]
+      socket.emit("opencode:providers:list:result", data.providers ?? []);
+    } catch (err: any) {
+      socket.emit("opencode:providers:list:result", []);
+      socket.emit("opencode:error", { error: "Failed to list providers", details: err.message });
+    }
+  });
+
   // List sessions
   socket.on("opencode:sessions:list", async () => {
     try {
