@@ -304,6 +304,21 @@ io.on("connection", async (socket) => {
     },
   );
 
+  // Abort an in-flight session prompt
+  socket.on("opencode:abort", async (data: { sessionId: string }) => {
+    try {
+      const res = await fetch(`${OPENCODE_BASE_URL}/session/${data.sessionId}/abort`, {
+        method: "POST",
+      });
+      if (!res.ok) throw new Error(`OpenCode ${res.status}`);
+      socket.emit("opencode:aborted", { sessionId: data.sessionId });
+    } catch (err: any) {
+      socket.emit("opencode:error", { error: "Failed to abort session", details: err.message });
+      // Still tell the client to stop its streaming spinner so it doesn't hang
+      socket.emit("opencode:aborted", { sessionId: data.sessionId });
+    }
+  });
+
   // Get messages for a session
   socket.on("opencode:messages:list", async (data: { sessionId: string }) => {
     try {
