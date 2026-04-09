@@ -38,7 +38,7 @@ const PROJECT_DIR = "./project";
 const PROJECT_DIR_ABS = resolve(PROJECT_DIR);
 
 const OPENCODE_BASE_URL =
-  process.env.OPENCODE_BASE_URL || "http://localhost:4096";
+  process.env.OPENCODE_BASE_URL || "http://127.0.0.1:4096";
 
 interface OpenCodeSession {
   shell: ReturnType<typeof Bun.spawn> | null;

@@ -1,4 +1,4 @@
-const OPENCODE_BASE_URL = process.env.OPENCODE_BASE_URL || "http://localhost:4096"
+const OPENCODE_BASE_URL = process.env.OPENCODE_BASE_URL || "http://127.0.0.1:4096"
 
 export async function GET() {
   // Proxy the raw SSE stream from OpenCode server

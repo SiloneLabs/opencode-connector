@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 
 const OPENCODE_BASE_URL =
-  process.env.OPENCODE_BASE_URL || "http://localhost:4096";
+  process.env.OPENCODE_BASE_URL || "http://127.0.0.1:4096";
 
 const app = new Hono();
 
