@@ -99,7 +99,7 @@ io.on("connection", async (socket) => {
     // kill stale shell before respawn
     killPty(session.shell);
 
-    session.shell = Bun.spawn(["bash", "--login"], {
+    session.shell = Bun.spawn(["bash"], {
       cwd: PROJECT_DIR_ABS,
       env: {
         ...process.env,
@@ -123,11 +123,11 @@ io.on("connection", async (socket) => {
     killPty(session.opencode);
 
     console.log(`[spawnOpencode] userId=${userId} cols=${cols} rows=${rows}`);
-    session.opencode = Bun.spawn(["opencode"], {
+    session.opencode = Bun.spawn(["bash", "-lc", "opencode"], {
       cwd: PROJECT_DIR_ABS,
       env: {
+        ...process.env,
         TERM: "xterm-256color",
-        PATH: process.env.PATH || "",
         ANTHROPIC_API_KEY: userId,
       },
       terminal: {
