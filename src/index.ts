@@ -14,7 +14,7 @@ import { resolve } from "path";
 import { cors } from "hono/cors";
 import chokidar from "chokidar";
 import { fetchUserIdFromToken } from "./helper";
-import { createOpencodeClient } from "@opencode-ai/sdk";
+import { createOpencode } from "@opencode-ai/sdk";
 
 const io = new Server({ cors: { origin: "*" } });
 const engine = new Engine();
@@ -38,23 +38,28 @@ io.use(async (socket, next) => {
 const PROJECT_DIR = "./project";
 const PROJECT_DIR_ABS = resolve(PROJECT_DIR);
 
-// ── OpenCode SDK client ──────────────────────────────────────────────────────
-// Connect to the opencode server already running via PM2 on port 4096
-const OPENCODE_SERVER_URL = process.env.OPENCODE_SERVER_URL || "http://127.0.0.1:4096";
+// ── OpenCode SDK (embedded server + client) ─────────────────────────────────
+const OPENCODE_PORT = Number(process.env.OPENCODE_PORT) || 4096;
 
-let opencodeClient: ReturnType<typeof createOpencodeClient>;
+let opencodeClient: Awaited<ReturnType<typeof createOpencode>>["client"];
+let opencodeServer: Awaited<ReturnType<typeof createOpencode>>["server"];
 let opencodeReady: Promise<void>;
 
 opencodeReady = (async () => {
   try {
-    console.log(`[opencode] Connecting to existing server at ${OPENCODE_SERVER_URL}...`);
-    opencodeClient = createOpencodeClient({ baseUrl: OPENCODE_SERVER_URL });
-    console.log("[opencode] Client connected");
+    console.log(`[opencode] Starting embedded server on port ${OPENCODE_PORT}...`);
+    const opencode = await createOpencode({
+      port: OPENCODE_PORT,
+      hostname: "127.0.0.1",
+    });
+    opencodeClient = opencode.client;
+    opencodeServer = opencode.server;
+    console.log(`[opencode] Server running at ${opencode.server.url}`);
 
     // Start the global SSE event bridge
     startEventBridge();
   } catch (err) {
-    console.error("[opencode] Failed to create client:", err);
+    console.error("[opencode] Failed to start embedded server:", err);
   }
 })();
 
@@ -476,7 +481,16 @@ app.use(
 const { websocket } = engine.handler();
 
 // Initialize OpenCode SDK on startup
-// SDK initializes at module load via opencodeReady promise
+// Graceful shutdown — close the embedded opencode server
+process.on("SIGINT", () => {
+  console.log("[opencode] Shutting down embedded server...");
+  opencodeServer?.close();
+  process.exit(0);
+});
+process.on("SIGTERM", () => {
+  opencodeServer?.close();
+  process.exit(0);
+});
 
 export default {
   port: 9000,
