@@ -14,7 +14,7 @@ import { resolve } from "path";
 import { cors } from "hono/cors";
 import chokidar from "chokidar";
 import { fetchUserIdFromToken } from "./helper";
-import { createOpencode } from "@opencode-ai/sdk";
+import { createOpencodeClient } from "@opencode-ai/sdk";
 
 const io = new Server({ cors: { origin: "*" } });
 const engine = new Engine();
@@ -39,20 +39,22 @@ const PROJECT_DIR = "./project";
 const PROJECT_DIR_ABS = resolve(PROJECT_DIR);
 
 // ── OpenCode SDK client ──────────────────────────────────────────────────────
-let opencodeClient: Awaited<ReturnType<typeof createOpencode>>["client"];
+// Connect to the opencode server already running via PM2 on port 4096
+const OPENCODE_SERVER_URL = process.env.OPENCODE_SERVER_URL || "http://127.0.0.1:4096";
+
+let opencodeClient: ReturnType<typeof createOpencodeClient>;
 let opencodeReady: Promise<void>;
 
 opencodeReady = (async () => {
   try {
-    console.log("[opencode] Starting SDK server...");
-    const { client } = await createOpencode({ timeout: 15000 });
-    opencodeClient = client;
-    console.log("[opencode] SDK server started");
+    console.log(`[opencode] Connecting to existing server at ${OPENCODE_SERVER_URL}...`);
+    opencodeClient = createOpencodeClient({ baseUrl: OPENCODE_SERVER_URL });
+    console.log("[opencode] Client connected");
 
     // Start the global SSE event bridge
     startEventBridge();
   } catch (err) {
-    console.error("[opencode] Failed to start SDK server:", err);
+    console.error("[opencode] Failed to create client:", err);
   }
 })();
 
