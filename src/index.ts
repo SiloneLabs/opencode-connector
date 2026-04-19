@@ -14,7 +14,7 @@ import { resolve } from "path";
 import { cors } from "hono/cors";
 import chokidar from "chokidar";
 import { fetchUserIdFromToken } from "./helper";
-import { createOpencode } from "@opencode-ai/sdk";
+import { startOpencodeAPI, stopOpencode } from "./opencode-server";
 
 const io = new Server({ cors: { origin: "*" } });
 const engine = new Engine();
@@ -38,80 +38,11 @@ io.use(async (socket, next) => {
 const PROJECT_DIR = "./project";
 const PROJECT_DIR_ABS = resolve(PROJECT_DIR);
 
-// ── OpenCode SDK (embedded server + client) ─────────────────────────────────
-const OPENCODE_PORT = Number(process.env.OPENCODE_PORT) || 4096;
-
-let opencodeClient: Awaited<ReturnType<typeof createOpencode>>["client"];
-let opencodeServer: Awaited<ReturnType<typeof createOpencode>>["server"];
-let opencodeReady: Promise<void>;
-
-opencodeReady = (async () => {
-  try {
-    console.log(`[opencode] Starting embedded server on port ${OPENCODE_PORT}...`);
-    const opencode = await createOpencode({
-      port: OPENCODE_PORT,
-      hostname: "127.0.0.1",
-    });
-    opencodeClient = opencode.client;
-    opencodeServer = opencode.server;
-    console.log(`[opencode] Server running at ${opencode.server.url}`);
-
-    // Start the global SSE event bridge
-    startEventBridge();
-  } catch (err) {
-    console.error("[opencode] Failed to start embedded server:", err);
-  }
-})();
-
-// ── Session → Socket routing ─────────────────────────────────────────────────
-// Maps opencode sessionId → socket id, so SSE events reach the right client
-const sessionToSocket = new Map<string, string>();
-
-function startEventBridge() {
-  (async () => {
-    try {
-      const events = await opencodeClient.event.subscribe();
-      for await (const event of events.stream) {
-        const evt = event as any;
-        const type = evt.type;
-        const properties = evt.properties ?? evt;
-
-        // Route event to the correct socket using sessionID from properties
-        const sessionID =
-          properties?.sessionID ||
-          properties?.part?.sessionID ||
-          properties?.info?.sessionID;
-
-        if (sessionID) {
-          const socketId = sessionToSocket.get(sessionID);
-          if (socketId) {
-            io.to(socketId).emit("opencode:event", {
-              type,
-              data: { type, properties },
-            });
-          }
-        } else {
-          // Broadcast events without a sessionID (server-level events)
-          io.emit("opencode:event", {
-            type,
-            data: { type, properties },
-          });
-        }
-      }
-    } catch (err) {
-      console.error("[opencode] SSE event bridge error:", err);
-      // Retry after a delay
-      setTimeout(() => startEventBridge(), 3000);
-    }
-  })();
-}
-
 // ── Per-user state ───────────────────────────────────────────────────────────
 const sessions = new Map<
   string,
   {
     shell: ReturnType<typeof Bun.spawn> | null;
-    opencodeSessionId: string | null;
   }
 >();
 
@@ -140,12 +71,8 @@ io.on("connection", async (socket) => {
   if (sessions.has(userId)) {
     const old = sessions.get(userId)!;
     killPty(old.shell);
-    // Clean up session→socket mapping
-    if (old.opencodeSessionId) {
-      sessionToSocket.delete(old.opencodeSessionId);
-    }
   }
-  sessions.set(userId, { shell: null, opencodeSessionId: null });
+  sessions.set(userId, { shell: null });
 
   socket.on("file:tree:expand", async (dir: string) => {
     try {
@@ -207,142 +134,6 @@ io.on("connection", async (socket) => {
       }
     },
   );
-
-  // ── OpenCode SDK events ──────────────────────────────────────────────────
-
-  socket.on(
-    "opencode:session:create",
-    async (data: any) => {
-      await opencodeReady;
-      if (!opencodeClient) {
-        socket.emit("opencode:error", { error: "OpenCode not initialized" });
-        return;
-      }
-      try {
-        const result = await opencodeClient.session.create({
-          body: { title: data?.title || "IDE Session" },
-        });
-        const session = (result as any).data ?? result;
-        const sessionId = session.id;
-
-        // Track this session for the user
-        const userSession = sessions.get(userId);
-        if (userSession) {
-          // Clean up old session mapping
-          if (userSession.opencodeSessionId) {
-            sessionToSocket.delete(userSession.opencodeSessionId);
-          }
-          userSession.opencodeSessionId = sessionId;
-        }
-        sessionToSocket.set(sessionId, socket.id);
-
-        socket.emit("opencode:session:created", {
-          id: sessionId,
-          title: session.title,
-        });
-      } catch (err: any) {
-        console.error("[opencode] session.create error:", err);
-        socket.emit("opencode:error", {
-          error: "Failed to create session",
-          details: err.message,
-        });
-      }
-    },
-  );
-
-  socket.on(
-    "opencode:prompt",
-    async (data: {
-      sessionId: string;
-      text: string;
-      providerID?: string;
-      modelID?: string;
-    }) => {
-      await opencodeReady;
-      if (!opencodeClient) {
-        socket.emit("opencode:error", { error: "OpenCode not initialized" });
-        return;
-      }
-
-      // Ensure the session→socket mapping is current (in case of reconnect)
-      sessionToSocket.set(data.sessionId, socket.id);
-
-      try {
-        socket.emit("opencode:prompt:sent");
-
-        const body: any = {
-          parts: [{ type: "text", text: data.text }],
-        };
-
-        if (data.providerID && data.modelID) {
-          body.model = {
-            providerID: data.providerID,
-            modelID: data.modelID,
-          };
-        }
-
-        const result = await opencodeClient.session.prompt({
-          path: { id: data.sessionId },
-          body,
-        });
-
-        socket.emit("opencode:message:complete", {
-          sessionId: data.sessionId,
-          result: (result as any).data ?? result,
-        });
-      } catch (err: any) {
-        console.error("[opencode] prompt error:", err);
-        socket.emit("opencode:error", {
-          error: "Prompt failed",
-          details: err.message,
-        });
-        socket.emit("opencode:message:complete", {
-          sessionId: data.sessionId,
-          error: err.message,
-        });
-      }
-    },
-  );
-
-  socket.on("opencode:abort", async (data: { sessionId: string }) => {
-    await opencodeReady;
-    if (!opencodeClient) return;
-    try {
-      await opencodeClient.session.abort({
-        path: { id: data.sessionId },
-      });
-      socket.emit("opencode:aborted");
-    } catch (err: any) {
-      console.error("[opencode] abort error:", err);
-    }
-  });
-
-  socket.on("opencode:providers:list", async () => {
-    await opencodeReady;
-    if (!opencodeClient) {
-      socket.emit("opencode:providers:list:result", []);
-      return;
-    }
-    try {
-      const result = await opencodeClient.config.providers();
-      const raw = (result as any).data ?? result;
-
-      // SDK returns { providers: ProviderInfo[] } — an array, not an object
-      const providersList = Array.isArray(raw) ? raw : (raw.providers ?? []);
-
-      // Transform to the format the frontend expects
-      const providers = providersList.map((provider: any) => ({
-        id: provider.id,
-        name: provider.name || provider.id,
-        models: provider.models || {},
-      }));
-
-      socket.emit("opencode:providers:list:result", providers);
-    } catch (err: any) {
-      console.error("[opencode] providers.list error:", err);
-      socket.emit("opencode:providers:list:result", []);
-    }
-  });
 
   // filesystem operations
   socket.on("file:read", async (path: string) => {
@@ -419,9 +210,6 @@ io.on("connection", async (socket) => {
     const session = sessions.get(userId);
     if (session) {
       killPty(session.shell);
-      if (session.opencodeSessionId) {
-        sessionToSocket.delete(session.opencodeSessionId);
-      }
       sessions.delete(userId);
     }
   });
@@ -480,15 +268,17 @@ app.use(
 
 const { websocket } = engine.handler();
 
-// Initialize OpenCode SDK on startup
-// Graceful shutdown — close the embedded opencode server
+// ── Start OpenCode API server on port 4000 ──────────────────────────────────
+const OPENCODE_API_PORT = Number(process.env.OPENCODE_API_PORT) || 4000;
+startOpencodeAPI(OPENCODE_API_PORT);
+
+// Graceful shutdown
 process.on("SIGINT", () => {
-  console.log("[opencode] Shutting down embedded server...");
-  opencodeServer?.close();
+  stopOpencode();
   process.exit(0);
 });
 process.on("SIGTERM", () => {
-  opencodeServer?.close();
+  stopOpencode();
   process.exit(0);
 });
 
