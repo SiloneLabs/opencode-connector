@@ -25,11 +25,27 @@ const sessionWriters = new Map<string, Set<SSEWriter>>();
 const OPENCODE_PORT = Number(process.env.OPENCODE_PORT) || 4096;
 const OPENCODE_URL = process.env.OPENCODE_SERVER_URL;
 
+async function probeOpencode(url: string, timeoutMs = 500): Promise<boolean> {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    const res = await fetch(url, { signal: ctrl.signal });
+    clearTimeout(t);
+    return res.status < 500;
+  } catch {
+    return false;
+  }
+}
+
 const initPromise = (async () => {
   try {
-    if (OPENCODE_URL) {
-      console.log(`[opencode-api] Connecting to existing server at ${OPENCODE_URL}...`);
-      client = createOpencodeClient({ baseUrl: OPENCODE_URL });
+    const localUrl = `http://127.0.0.1:${OPENCODE_PORT}`;
+    const targetUrl =
+      OPENCODE_URL ?? ((await probeOpencode(localUrl)) ? localUrl : null);
+
+    if (targetUrl) {
+      console.log(`[opencode-api] Connecting to existing server at ${targetUrl}...`);
+      client = createOpencodeClient({ baseUrl: targetUrl });
       console.log("[opencode-api] Client connected");
     } else {
       console.log(`[opencode-api] Starting embedded server on port ${OPENCODE_PORT}...`);
