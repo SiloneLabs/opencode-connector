@@ -227,15 +227,25 @@ io.on("connection", async (socket) => {
 // watch project dir, debounce + push refreshed tree to all clients
 let debounceTimer: Timer | null = null;
 
+const IGNORED_DIRS = new Set([
+  "node_modules",
+  "target",
+  ".next",
+  ".git",
+  ".soroban",
+]);
+
 const watcher = chokidar.watch(PROJECT_DIR_ABS, {
-  ignored: [
-    "**/node_modules/**",
-    "**/target/**",
-    "**/.next/**",
-    "**/.git/**",
-    "**/.soroban/**",
-    "**/*.log",
-  ],
+  ignored: (filePath: string, stats?: { isDirectory(): boolean }) => {
+    const segments = filePath.split("/");
+    const base = segments[segments.length - 1] ?? "";
+    if (base.endsWith(".log")) return true;
+    // Short-circuit: if this entry is a directory in IGNORED_DIRS, prune it
+    // before chokidar descends. Without the stats-aware check, chokidar v4
+    // walks into node_modules and crashes on fs.watch EINVAL for some files.
+    if (stats?.isDirectory() && IGNORED_DIRS.has(base)) return true;
+    return segments.some((segment) => IGNORED_DIRS.has(segment));
+  },
   ignoreInitial: true,
   persistent: true,
   depth: 10,
@@ -256,6 +266,20 @@ watcher.on("all", (_event, filePath) => {
     const tree = await generateFileTree(PROJECT_DIR, true);
     io.emit("file:tree", tree);
   }, 300);
+});
+
+// A single fs.watch failure (e.g. EINVAL on some node_modules file) must not
+// crash the connector. Log and keep running — the explorer may miss events
+// for that one path, but the session stays alive.
+watcher.on("error", (err) => {
+  console.error("[watcher] non-fatal error:", err);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("[process] uncaughtException (kept alive):", err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[process] unhandledRejection (kept alive):", reason);
 });
 
 const app = new Hono();
