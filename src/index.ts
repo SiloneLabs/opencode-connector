@@ -135,6 +135,14 @@ io.on("connection", async (socket) => {
     },
   );
 
+  // kill running shell — client sends dims next to respawn
+  socket.on("terminal:kill:shell", () => {
+    const session = sessions.get(userId);
+    if (!session) return;
+    killPty(session.shell);
+    session.shell = null;
+  });
+
   // filesystem operations
   socket.on("file:read", async (path: string) => {
     try {
