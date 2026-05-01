@@ -58,7 +58,7 @@ function safePath(userPath: string): string {
 function killPty(proc: ReturnType<typeof Bun.spawn> | null) {
   if (!proc) return;
   try {
-    proc.kill();
+    proc.kill(9); // SIGKILL — immediate, no graceful shutdown, stops buffered output fast
     proc.terminal?.close();
   } catch (_) {}
 }
